@@ -132,6 +132,52 @@ The generic form is `PRECISION=<fp32|fp16|int8> make engine`. Engine filenames i
 
 INT8 is accepted only as an explicit choice. Use an ONNX model with valid Q/DQ quantization, or provide a representative cache with `CALIBRATION_CACHE=/path/to/calibration.cache make int8`. Never use random calibration data.
 
+## C++ forward-inference deployment
+
+The target runtime in `cpp/` uses the TensorRT C++ name-based I/O API (`setTensorAddress` and `enqueueV3`) and CUDA Runtime directly. It deserializes a target-local plan, allocates pinned host and GPU buffers for every input/output tensor, fills deterministic zero dummy input, performs asynchronous H2D/inference/D2H on one CUDA stream, and checksums every returned output.
+
+Build it on the Orin Nano so it links against the board's TensorRT 10.3.0.30 and CUDA installation:
+
+`make cpp-build`
+
+Standard JetPack package locations are discovered automatically. For a custom TensorRT installation:
+
+`TENSORRT_ROOT=/path/to/TensorRT make cpp-build`
+
+Run the default FP32 engine:
+
+`make infer`
+
+Select another previously built engine by precision:
+
+| Precision | Engine build | C++ inference |
+| --- | --- | --- |
+| FP32 | `make fp32` | `make infer` or `make infer-fp32` |
+| FP16 | `make fp16` | `make infer-fp16` |
+| INT8 | `make int8` | `make infer-int8` |
+
+TensorRT execution code is precision-agnostic: precision is determined when the plan is built. Engine filenames contain precision, and the run script uses `PRECISION` to select the matching plan. Tensor I/O dtype may remain FP32 even when internal layers use FP16/INT8; the program always allocates buffers from the actual engine I/O metadata.
+
+Useful runtime overrides:
+
+- `CPP_WARMUP=50 CPP_ITERATIONS=500 make infer`: change warmup and measured sample count.
+- `INCLUDE_TRANSFERS=0 make infer`: measure inference-only mode without H2D/D2H copies.
+- `ENGINE_PATH=/absolute/model.plan make infer`: select an explicit engine.
+- `INPUT_SHAPE=input=1x3x512x416 make infer`: resolve a dynamic input shape. Repeat `--shape` by invoking the binary directly for multiple dynamic inputs.
+- `INFER_JSON=/path/metrics.json make infer`: select the machine-readable output path.
+- `./build/cpp/bnudc_trt_infer --help`: show direct C++ CLI usage.
+
+The default output is written under `results/cpp_inference_<precision>_<timestamp>.json`. It includes:
+
+- Engine, GPU, TensorRT compile version, sample counts, I/O count, and transferred bytes.
+- H2D, pure TensorRT inference, D2H, and serialized end-to-end latency.
+- Mean, minimum, maximum, standard deviation, p50, p90, p95, and p99 for every latency stage.
+- Inference-only and serial end-to-end throughput in inferences/second.
+- Inference jitter coefficient of variation (`stddev / mean`).
+- FNV-1a output checksums for the dummy input, which provide a lightweight forward/output sanity signal but are not an accuracy test.
+
+The program deliberately uses one stream and synchronizes each measured request, so its end-to-end throughput represents serial request processing rather than maximum multi-stream throughput. Use it for reproducible deployment latency and regression comparisons. Use `trtexec` multi-stream tests for saturation throughput, and compare outputs against PyTorch/ONNX Runtime with real representative inputs before production acceptance.
+
 ## Optimization sequence
 
 1. **Correctness baseline/default:** build FP32 and compare all three outputs with PyTorch using representative images.
