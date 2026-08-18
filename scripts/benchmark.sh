@@ -11,6 +11,8 @@ version="${version:-unknown}"
 input_engine="${ENGINE_PATH:-$(engine_path "${version}")}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 result_prefix="${RESULTS_DIR}/benchmark_${PRECISION}_${timestamp}"
+profile_json="${result_prefix}_profile.json"
+layer_info_json="${result_prefix}_layers.json"
 tegrastats_pid=""
 
 if [[ ! -s "${input_engine}" ]]; then
@@ -43,8 +45,21 @@ echo "Benchmarking ${input_engine}"
     --useCudaGraph \
     --useSpinWait \
     --percentile=50,90,95,99 \
+    --dumpProfile \
+    --separateProfileRun \
     "--exportTimes=${result_prefix}_times.json" \
-    "--exportProfile=${result_prefix}_profile.json" \
+    "--exportProfile=${profile_json}" \
+    "--exportLayerInfo=${layer_info_json}" \
     2>&1 | tee "${result_prefix}.log"
 
+if [[ -s "${profile_json}" ]]; then
+    python3 "${SCRIPT_DIR}/summarize_profile.py" \
+        --profile "${profile_json}" \
+        --layer-info "${layer_info_json}" \
+        --output "${result_prefix}_summary.md"
+else
+    echo "WARNING: TensorRT did not create profile JSON; optimization summary was skipped." >&2
+fi
+
 echo "Benchmark results: ${result_prefix}*"
+exit 0

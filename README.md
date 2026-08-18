@@ -73,7 +73,7 @@ Required/recommended target stack:
 
    `make benchmark`
 
-Generated plans are stored under `engines/`. Build logs, per-query timing JSON, profile JSON, and Jetson telemetry are stored under `results/`.
+Generated plans are stored under `engines/`. Build logs, per-query timing JSON, layer profile/info JSON, optimization summaries, and Jetson telemetry are stored under `results/`.
 
 ## TensorRT-aware ONNX operator check
 
@@ -143,6 +143,37 @@ INT8 is accepted only as an explicit choice. Use an ONNX model with valid Q/DQ q
 The benchmark uses CUDA Graph, spin-wait, batch 1, and one inference stream by default. Report at least median, p95, p99, throughput, GPU/CPU clocks, power mode, JetPack/TensorRT versions, and board power. Compare runs only under identical thermal and power conditions.
 
 `trtexec` uses synthetic input unless real tensors are supplied. Its result measures the TensorRT engine, not image decode, normalization, output conversion, or the complete application pipeline.
+
+### Automatic layer-profile optimization summary
+
+After a successful `make benchmark`, the project automatically analyzes TensorRT's per-layer profile and generates:
+
+- `benchmark_*_summary.md`: human-readable optimization report.
+- `benchmark_*_summary.csv`: every layer sorted by average GPU execution time, suitable for spreadsheets.
+- `benchmark_*_summary.json`: machine-readable aggregate statistics for comparison/CI.
+- `benchmark_*_layers.json`: TensorRT layer metadata used to improve operator categorization.
+
+The layer profiler runs separately from the main latency benchmark so profiler attachment does not contaminate the reported benchmark latency. The report uses common performance-analysis views:
+
+- Hot layers sorted by average per-inference GPU layer time.
+- Per-layer time share and cumulative share.
+- Top-1/top-5/top-10 concentration.
+- Number of layers covering 50%, 80%, 90%, and 95% of measured layer time (Pareto analysis).
+- Time aggregated by operator category, including convolution, matrix multiplication, normalization, activation, resize, elementwise, reformat/copy, plugin, and others.
+- Long-tail analysis for layers below 1% each, useful for finding launch overhead or missed fusion.
+- Prioritized candidates covering the first 80% or at least 3% individually, with category-specific optimization recommendations.
+
+To regenerate a report for the newest benchmark without rerunning inference:
+
+`make profile-summary`
+
+To analyze an explicitly selected TensorRT profile:
+
+`PROFILE_JSON=/path/profile.json LAYER_INFO_JSON=/path/layers.json make profile-summary`
+
+TensorRT `averageMs` is a per-layer GPU execution-time measurement, **not GPU utilization, SM occupancy, or memory-bandwidth utilization**. Use Nsight Systems to inspect transfers, synchronization, CPU/GPU overlap, kernel launch gaps, and end-to-end pipeline behavior. Use Nsight Compute only after narrowing the problem to a small number of expensive kernels.
+
+For useful optimization decisions, perform at least three runs under the same `nvpmodel`, locked clocks, temperature range, precision, shapes, and stream count. Prioritize stable layers/categories covering roughly 80% of time, then estimate the maximum end-to-end gain using Amdahl's law. Avoid optimizing a high-percentage layer if its absolute time is already negligible.
 
 ## Important constraints
 

@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark fp32 fp16 int8 clean
+.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark profile-summary fp32 fp16 int8 clean
 
 check:
 	./scripts/check_env.sh
@@ -22,6 +22,9 @@ engine:
 
 benchmark:
 	./scripts/benchmark.sh
+
+profile-summary:
+	./scripts/summarize_latest_profile.sh
 
 fp32:
 	PRECISION=fp32 ./scripts/build_engine.sh
