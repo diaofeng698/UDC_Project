@@ -1,15 +1,21 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: check onnx-check onnx-check-fp32 engine benchmark fp32 fp16 clean
+.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark fp32 fp16 int8 clean
 
 check:
 	./scripts/check_env.sh
 
 onnx-check:
-	CHECK_PRECISION=fp16 ./scripts/check_onnx_support.sh
+	./scripts/check_onnx_support.sh
 
 onnx-check-fp32:
 	CHECK_PRECISION=fp32 ./scripts/check_onnx_support.sh
+
+onnx-check-fp16:
+	CHECK_PRECISION=fp16 ./scripts/check_onnx_support.sh
+
+onnx-check-int8:
+	CHECK_PRECISION=int8 ./scripts/check_onnx_support.sh
 
 engine:
 	./scripts/build_engine.sh
@@ -22,6 +28,9 @@ fp32:
 
 fp16:
 	PRECISION=fp16 ./scripts/build_engine.sh
+
+int8:
+	PRECISION=int8 ./scripts/build_engine.sh
 
 clean:
 	rm -rf engines results

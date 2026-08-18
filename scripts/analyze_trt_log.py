@@ -92,7 +92,7 @@ def main() -> int:
     parser.add_argument("--report", required=True, type=pathlib.Path)
     parser.add_argument("--trt-version", default="unknown")
     parser.add_argument("--package-version", default="unknown")
-    parser.add_argument("--precision", default="fp16")
+    parser.add_argument("--precision", default="fp32")
     parser.add_argument("--command-status", type=int, default=0)
     args = parser.parse_args()
 
