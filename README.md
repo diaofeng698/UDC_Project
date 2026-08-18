@@ -90,6 +90,8 @@ Result levels:
 - **WARNING:** TensorRT may have built successfully, but it emitted casts/clamps or the graph contains operators needing compatibility, semantic, datatype, or numerical review.
 - **ERROR:** TensorRT rejected parsing/building, no implementation/tactic was available, or `trtexec` returned failure. The command exits nonzero so it can be used in CI.
 
+During tactic search, TensorRT can report `Could not find any implementation ... due to insufficient workspace` for one candidate backend and then print `Skipping this backend strategy`. If the final `trtexec` command passes and the engine build completes, this is a recovered strategy fallback rather than an ONNX incompatibility. The report classifies it as **WARNING** and lists it separately. Increasing `WORKSPACE_MIB` may expose additional/faster tactics, but is not required merely for compatibility when another strategy built successfully.
+
 Additional uses:
 
 - `make onnx-check-fp32`: explicitly run the FP32 compatibility baseline; equivalent to `make onnx-check`.

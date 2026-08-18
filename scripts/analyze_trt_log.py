@@ -58,6 +58,8 @@ def compact_diagnostics(lines: list[str], pattern: re.Pattern[str]) -> list[str]
     for index, line in enumerate(lines):
         if not pattern.search(line) or IGNORE_ERROR_PATTERN.search(line):
             continue
+        if NODE_PATTERN.search(line) and not re.search(r"\[(?:E|F)\]", line):
+            continue
         message = line.strip()
         next_index = index + 1
         while next_index < len(lines) and not re.search(r"^\[|^&&&&", lines[next_index]):
@@ -71,6 +73,11 @@ def compact_diagnostics(lines: list[str], pattern: re.Pattern[str]) -> list[str]
 
 def diagnostic_recommendation(message: str) -> str:
     lowered = message.lower()
+    if "insufficient workspace" in lowered or "insufficient memory on requested size" in lowered:
+        return (
+            "TensorRT skipped a candidate tactic/backend because of its workspace request. If the final build passed, "
+            "the engine is compatible; increase WORKSPACE_MIB only to give TensorRT more tactic choices and then benchmark again."
+        )
     if "does not match detected package major" in lowered:
         return "Set TRTEXEC to the trtexec shipped with the intended TensorRT package and rerun the scan."
     if "int64" in lowered and "int32" in lowered:
@@ -84,6 +91,16 @@ def diagnostic_recommendation(message: str) -> str:
     if "failed to parse" in lowered or "parsing model failed" in lowered:
         return "Inspect the first preceding parser error; simplify/re-export that node or use a compatible plugin/opset."
     return "Review the complete log and verify representative outputs against the reference implementation."
+
+
+def is_recovered_builder_fallback(message: str, build_passed: bool) -> bool:
+    """Return true for failed candidate strategies when TensorRT later built the engine."""
+    if not build_passed:
+        return False
+    lowered = message.lower()
+    skipped_strategy = "skipping this backend strategy" in lowered or "skipping tactic" in lowered
+    resource_limited = "insufficient workspace" in lowered or "insufficient memory" in lowered
+    return skipped_strategy and resource_limited
 
 
 def main() -> int:
@@ -105,10 +122,19 @@ def main() -> int:
             nodes.append((match.group(1), match.group(2)))
 
     operator_counts = collections.Counter(operator for _, operator in nodes)
-    errors = compact_diagnostics(lines, ERROR_PATTERN)
+    raw_errors = compact_diagnostics(lines, ERROR_PATTERN)
     warnings = compact_diagnostics(lines, WARNING_PATTERN)
     parsed = "Finished parsing network model" in text or "Successfully parsed ONNX file" in text
     build_passed = args.command_status == 0 and ("&&&& PASSED" in text or "Serialized engine" in text or "Engine built" in text)
+    recovered_fallbacks = list(
+        dict.fromkeys(
+            message
+            for message in raw_errors + warnings
+            if is_recovered_builder_fallback(message, build_passed)
+        )
+    )
+    errors = [message for message in raw_errors if message not in recovered_fallbacks]
+    warnings = [message for message in warnings if not is_recovered_builder_fallback(message, build_passed)]
     if args.command_status == 0 and not build_passed:
         warnings.append("TensorRT build completion marker was not found; the log may contain parser output only or be truncated.")
     package_major = args.package_version.split(".", 1)[0]
@@ -127,7 +153,7 @@ def main() -> int:
         elif operator in REDUCTION_OPS:
             findings.append(("precision", operator, count, "Reduction accumulation can differ in FP16; compare with FP32/ONNX Runtime."))
 
-    status = "ERROR" if errors or args.command_status != 0 else "WARNING" if warnings or findings else "PASS"
+    status = "ERROR" if errors or args.command_status != 0 else "WARNING" if recovered_fallbacks or warnings or findings else "PASS"
     args.report.parent.mkdir(parents=True, exist_ok=True)
     with args.report.open("w", encoding="utf-8") as report:
         report.write("# TensorRT ONNX operator compatibility report\n\n")
@@ -150,16 +176,27 @@ def main() -> int:
         else:
             report.write("- None detected.\n")
 
+        report.write("\n## Recovered TensorRT tactic/backend fallbacks\n\n")
+        if recovered_fallbacks:
+            report.write(
+                "TensorRT rejected these candidate strategies but selected another implementation and completed the build. "
+                "They are performance-search warnings, not ONNX compatibility errors.\n\n"
+            )
+            report.writelines(f"- **WARNING:** {message}\n" for message in recovered_fallbacks)
+        else:
+            report.write("- None detected.\n")
+
         report.write("\n## TensorRT warnings\n\n")
         if warnings:
             report.writelines(f"- **WARNING:** {message}\n" for message in warnings)
         else:
             report.write("- None detected.\n")
 
-        if errors or warnings:
+        if errors or recovered_fallbacks or warnings:
             report.write("\n### Recommended actions\n\n")
-            for message in errors + warnings:
-                report.write(f"- {diagnostic_recommendation(message)}\n")
+            recommendations = dict.fromkeys(diagnostic_recommendation(message) for message in errors + recovered_fallbacks + warnings)
+            for recommendation in recommendations:
+                report.write(f"- {recommendation}\n")
 
         report.write("\n## Potential compatibility or precision review\n\n")
         report.write("These are conservative review items, not proof that an operator is unsupported.\n\n")
@@ -182,10 +219,13 @@ def main() -> int:
     print(f"TensorRT ONNX support result: {status}")
     print(f"  nodes/operators: {len(nodes)}/{len(operator_counts)}")
     print(f"  TensorRT errors: {len(errors)}")
+    print(f"  recovered builder fallbacks: {len(recovered_fallbacks)}")
     print(f"  TensorRT warnings: {len(warnings)}")
     print(f"  review findings: {len(findings)}")
     for message in errors[:5]:
         print(f"  ERROR: {message}")
+    for message in recovered_fallbacks[:5]:
+        print(f"  FALLBACK: {message}")
     for message in warnings[:5]:
         print(f"  WARNING: {message}")
     if findings:
