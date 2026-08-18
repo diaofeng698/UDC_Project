@@ -221,6 +221,23 @@ To analyze an explicitly selected TensorRT profile:
 
 TensorRT `averageMs` is a per-layer GPU execution-time measurement, **not GPU utilization, SM occupancy, or memory-bandwidth utilization**. Use Nsight Systems to inspect transfers, synchronization, CPU/GPU overlap, kernel launch gaps, and end-to-end pipeline behavior. Use Nsight Compute only after narrowing the problem to a small number of expensive kernels.
 
+### Jetson unified-memory OOM during benchmark
+
+On Orin Nano, CPU and GPU share the same 8GB physical memory. A message such as `NvMapMemAllocInternalTagged ... error 12` followed by `CUDA failure: out of memory` means the NVIDIA memory allocator could not satisfy a runtime allocation. It is not by itself evidence that an INT8 operator is unsupported. INT8 can still consume substantial memory because the engine contains weights, activation tensors, tactic scratch space, reformat/dequantization buffers, execution-context state, CUDA Graph capture allocations, and profiler state.
+
+First run the low-memory benchmark to separate the engine requirement from optional instrumentation:
+
+`PRECISION=int8 make benchmark-lite`
+
+This forces one stream and disables CUDA Graph and per-layer profiling. If it succeeds, add features back independently:
+
+- `PRECISION=int8 USE_CUDA_GRAPH=1 ENABLE_LAYER_PROFILE=0 make benchmark`
+- `PRECISION=int8 USE_CUDA_GRAPH=0 ENABLE_LAYER_PROFILE=1 make benchmark`
+
+The script now prints `MemAvailable`, free swap, and Jetson CMA information before loading TensorRT. Also inspect `tegrastats`, close other CUDA applications/camera pipelines/desktops where possible, and reboot before a controlled benchmark. Keep `INFERENCE_STREAMS=1`; each additional stream/context can require another activation workspace.
+
+`WORKSPACE_MIB` controls **engine build tactic search**, not the memory limit when loading/running an existing plan, so lowering it only at benchmark time has no effect. If even `benchmark-lite` fails, rebuild INT8 while the board has free memory, inspect the build log's persistent/activation/scratch memory lines, and compare against FP32/FP16. The selected INT8 tactic or inserted reformat/dequantization path may have a larger runtime requirement. Swap can help free CPU pages but does not guarantee a large CUDA/NvMap allocation; adequate physical `MemAvailable`/CMA is still required.
+
 For useful optimization decisions, perform at least three runs under the same `nvpmodel`, locked clocks, temperature range, precision, shapes, and stream count. Prioritize stable layers/categories covering roughly 80% of time, then estimate the maximum end-to-end gain using Amdahl's law. Avoid optimizing a high-percentage layer if its absolute time is already negligible.
 
 ## Important constraints

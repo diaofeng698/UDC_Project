@@ -23,6 +23,12 @@ fi
 
 mkdir -p "${RESULTS_DIR}"
 
+echo "Memory snapshot before TensorRT benchmark"
+free -h || true
+if [[ -r /proc/meminfo ]]; then
+    awk '/^(MemAvailable|SwapFree|CmaTotal|CmaFree):/ {print "  " $0}' /proc/meminfo
+fi
+
 cleanup() {
     if [[ -n "${tegrastats_pid}" ]]; then
         kill "${tegrastats_pid}" 2>/dev/null || true
@@ -37,27 +43,33 @@ if command -v tegrastats >/dev/null 2>&1; then
 fi
 
 echo "Benchmarking ${input_engine}"
-"${trtexec_bin}" \
-    "--loadEngine=${input_engine}" \
-    "--warmUp=${WARMUP_MS}" \
-    "--duration=${BENCHMARK_SECONDS}" \
-    "--streams=${INFERENCE_STREAMS}" \
-    --useCudaGraph \
-    --useSpinWait \
-    --percentile=50,90,95,99 \
-    --dumpProfile \
-    --separateProfileRun \
-    "--exportTimes=${result_prefix}_times.json" \
-    "--exportProfile=${profile_json}" \
-    "--exportLayerInfo=${layer_info_json}" \
-    2>&1 | tee "${result_prefix}.log"
+args=(
+    "--loadEngine=${input_engine}"
+    "--warmUp=${WARMUP_MS}"
+    "--duration=${BENCHMARK_SECONDS}"
+    "--streams=${INFERENCE_STREAMS}"
+    --useSpinWait
+    --percentile=50,90,95,99
+    "--exportTimes=${result_prefix}_times.json"
+    "--exportLayerInfo=${layer_info_json}"
+)
+if [[ "${USE_CUDA_GRAPH}" == "1" ]]; then
+    args+=(--useCudaGraph)
+fi
+if [[ "${ENABLE_LAYER_PROFILE}" == "1" ]]; then
+    args+=(--dumpProfile --separateProfileRun "--exportProfile=${profile_json}")
+fi
 
-if [[ -s "${profile_json}" ]]; then
+echo "  CUDA Graph: ${USE_CUDA_GRAPH}"
+echo "  Layer profile: ${ENABLE_LAYER_PROFILE}"
+"${trtexec_bin}" "${args[@]}" 2>&1 | tee "${result_prefix}.log"
+
+if [[ "${ENABLE_LAYER_PROFILE}" == "1" && -s "${profile_json}" ]]; then
     python3 "${SCRIPT_DIR}/summarize_profile.py" \
         --profile "${profile_json}" \
         --layer-info "${layer_info_json}" \
         --output "${result_prefix}_summary.md"
-else
+elif [[ "${ENABLE_LAYER_PROFILE}" == "1" ]]; then
     echo "WARNING: TensorRT did not create profile JSON; optimization summary was skipped." >&2
 fi
 
