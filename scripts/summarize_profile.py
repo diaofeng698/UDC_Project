@@ -87,15 +87,23 @@ def category_for(name: str, layer_type: str) -> str:
     return "Other"
 
 
-def layer_type_map(path: pathlib.Path | None) -> dict[str, str]:
+def layer_metadata_map(path: pathlib.Path | None) -> dict[str, tuple[str, str]]:
     if path is None or not path.is_file():
         return {}
-    result: dict[str, str] = {}
+    result: dict[str, tuple[str, str]] = {}
     for record in find_records(load_json(path), {"layertype", "type"}):
         name = value_for(record, "Name", "name")
         layer_type = value_for(record, "LayerType", "type", "layer_type")
         if name is not None and layer_type is not None:
-            result[str(name)] = str(layer_type)
+            tensor_records = value_for(record, "Outputs", "outputs") or value_for(record, "Inputs", "inputs") or []
+            precisions: set[str] = set()
+            if isinstance(tensor_records, list):
+                for tensor in tensor_records:
+                    if not isinstance(tensor, dict):
+                        continue
+                    tensor_format = str(value_for(tensor, "Format/Datatype", "format", "datatype") or "")
+                    precisions.update(re.findall(r"\b(?:FP32|FP16|BF16|FP8|INT8|INT32|INT64|UINT8|BOOL)\b", tensor_format.upper()))
+            result[str(name)] = (str(layer_type), "+".join(sorted(precisions)) or "unknown")
     return result
 
 
@@ -131,7 +139,7 @@ def main() -> int:
         return 2
 
     records = find_records(raw, {"averagems", "timems", "percentage"})
-    types = layer_type_map(args.layer_info)
+    metadata = layer_metadata_map(args.layer_info)
     rows: list[dict[str, Any]] = []
     for index, record in enumerate(records):
         name = str(value_for(record, "name", "layerName") or f"layer_{index}")
@@ -142,8 +150,17 @@ def main() -> int:
             average_ms = total_record_ms / count if total_record_ms is not None and count > 0 else total_record_ms
         if average_ms is None or average_ms < 0:
             continue
-        layer_type = types.get(name, str(value_for(record, "layerType", "type") or "unknown"))
-        rows.append({"name": name, "average_ms": average_ms, "count": count, "layer_type": layer_type})
+        layer_type, execution_precision = metadata.get(
+            name,
+            (str(value_for(record, "layerType", "type") or "unknown"), "unknown"),
+        )
+        rows.append({
+            "name": name,
+            "average_ms": average_ms,
+            "count": count,
+            "layer_type": layer_type,
+            "execution_precision": execution_precision,
+        })
 
     if not rows:
         print("ERROR: no layer timing records found in profile JSON", file=sys.stderr)
@@ -171,6 +188,12 @@ def main() -> int:
         categories[row["category"]]["count"] += 1
     category_rows = sorted(categories.items(), key=lambda item: item[1]["time"], reverse=True)
 
+    precisions: dict[str, dict[str, float]] = defaultdict(lambda: {"time": 0.0, "count": 0.0})
+    for row in rows:
+        precisions[row["execution_precision"]]["time"] += row["average_ms"]
+        precisions[row["execution_precision"]]["count"] += 1
+    precision_rows = sorted(precisions.items(), key=lambda item: item[1]["time"], reverse=True)
+
     candidate_rows = [row for row in rows if row["share"] >= 3.0 or row["cumulative"] - row["share"] < 80.0]
     tiny_rows = [row for row in rows if row["share"] < 1.0]
     top_limit = max(1, min(args.top, len(rows)))
@@ -183,7 +206,7 @@ def main() -> int:
     json_path = args.output.with_suffix(".json")
 
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["rank", "name", "layer_type", "category", "average_ms", "share", "cumulative", "count"])
+        writer = csv.DictWriter(handle, fieldnames=["rank", "name", "layer_type", "execution_precision", "category", "average_ms", "share", "cumulative", "count"])
         writer.writeheader()
         writer.writerows(rows)
 
@@ -196,6 +219,10 @@ def main() -> int:
         "categories": [
             {"category": category, "layer_count": int(values["count"]), "average_ms": values["time"], "share": values["time"] / total_ms * 100.0}
             for category, values in category_rows
+        ],
+        "execution_precisions": [
+            {"precision": precision, "layer_count": int(values["count"]), "average_ms": values["time"], "share": values["time"] / total_ms * 100.0}
+            for precision, values in precision_rows
         ],
         "optimization_candidates": [row["name"] for row in candidate_rows],
     }
@@ -214,10 +241,16 @@ def main() -> int:
         report.write(f"- Optimization candidates (>=3% individually or within cumulative 80%): **{len(candidate_rows)}**\n\n")
 
         report.write("## Hot layers by average GPU execution time\n\n")
-        report.write("| Rank | Layer | Type | Category | Avg ms | Share | Cumulative |\n| ---: | --- | --- | --- | ---: | ---: | ---: |\n")
+        report.write("| Rank | Layer | Type | Precision | Category | Avg ms | Share | Cumulative |\n| ---: | --- | --- | --- | --- | ---: | ---: | ---: |\n")
         for row in rows[:top_limit]:
             safe_name = row["name"].replace("|", "\\|")
-            report.write(f"| {row['rank']} | `{safe_name}` | {row['layer_type']} | {row['category']} | {row['average_ms']:.5f} | {row['share']:.2f}% | {row['cumulative']:.2f}% |\n")
+            report.write(f"| {row['rank']} | `{safe_name}` | {row['layer_type']} | {row['execution_precision']} | {row['category']} | {row['average_ms']:.5f} | {row['share']:.2f}% | {row['cumulative']:.2f}% |\n")
+
+        report.write("\n## Time grouped by actual TensorRT tensor precision\n\n")
+        report.write("This is derived from layer-info output tensor formats. Mixed or unknown entries must be inspected directly.\n\n")
+        report.write("| Rank | Precision | Layers | Avg ms | Share |\n| ---: | --- | ---: | ---: | ---: |\n")
+        for rank, (precision, values) in enumerate(precision_rows, start=1):
+            report.write(f"| {rank} | {precision} | {int(values['count'])} | {values['time']:.5f} | {values['time'] / total_ms * 100.0:.2f}% |\n")
 
         report.write("\n## Time grouped by operator category\n\n")
         report.write("Categories prefer TensorRT layer metadata when available and otherwise use layer-name heuristics; verify ambiguous `Other` entries in the layer-info JSON.\n\n")
