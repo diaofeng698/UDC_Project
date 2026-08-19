@@ -73,20 +73,66 @@ Jetson 统一内存有限，INT8 + CUDA Graph 需要单独进行内存安全验�
 
 计划修改：
 
-- [ ] 修改 `scripts/build_engine.sh`，INT8 构建同时传递 `--int8 --fp16`。
-- [ ] 为混合精度引擎使用独立名称，避免覆盖当前纯 INT8 基线。
-- [ ] 使用新的 timing cache，或清除旧缓存后做一次干净构建。
-- [ ] 保留当前随机 calibration cache 仅用于性能链路验证。
+- [x] 新增 `int8-fp16` 构建模式，同时传递 `--int8 --fp16`。
+- [x] 混合精度引擎使用 `int8-fp16` 独立名称，不覆盖纯 INT8 基线。
+- [x] timing cache 按精度隔离；混合精度首次构建使用新的 cache。
+- [x] 保留当前随机 calibration cache，仅用于性能链路验证。
 - [ ] 后续用真实代表性数据重新生成 calibration cache。
+
+实现过程中发现并修复了 workspace 单位问题：TensorRT 10.3 的
+`--memPoolSize` 接受 `M`，但不接受 `MiB` 后缀；原来的
+`workspace:2048MiB` 被解析成了 2048 字节。当前改为无后缀的
+`workspace:2048`（默认单位为 MiB），并将 workspace 大小加入 timing
+cache 文件名，避免复用错误容量下生成的缓存。
+
+实现后的常用命令：
+
+```bash
+# 使用已有随机 calibration cache 构建独立混合精度引擎
+make int8-fp16
+
+# 重新生成随机 calibration cache 后构建
+make int8-fp16-random
+
+# 关闭 CUDA Graph，执行带逐层 profile 的基准测试
+make benchmark-int8-fp16
+
+# 执行 C++ 推理
+make infer-int8-fp16
+```
+
+默认产物不会覆盖纯 INT8 文件：
+
+- Engine：`engines/bnudc_v1_trt_static_aarch64_trt100300_int8-fp16.plan`
+- Timing cache：`engines/timing_cache_trt100300_aarch64_int8-fp16_ws2048MiB.bin`
+- Build log：`results/build_trt100300_int8-fp16.log`
+- LayerInfo：`results/layers_trt100300_int8-fp16.json`
+- Benchmark：`results/benchmark_int8-fp16_<timestamp>*`
 
 构建后必须检查：
 
-- [ ] `/MatMul` 和 `/MatMul_1` 是否从 profile 中消失。
-- [ ] 是否重新出现 `__myl_MulSum_*` kernel。
-- [ ] 大型 `pre_conv8` 是否从 FP32 变为 FP16 或 INT8。
-- [ ] FP32 时间占比是否从 97.33% 大幅下降。
-- [ ] GPU Compute 是否接近或低于 FP16 基线 256.65 ms。
+- [x] `/MatMul` 和 `/MatMul_1` 未消失，仍是主要热点。
+- [x] 未重新出现 `__myl_MulSum_*` kernel。
+- [x] 大型 `pre_conv8` 已从 FP32 变为 FP16，单层约 5.1～5.5 ms。
+- [x] FP32 时间占比从 97.33% 降至 2.00%。
+- [x] GPU Compute 为 2593.57 ms，未达到 FP16 基线 256.65 ms。
 - [ ] 使用真实数据检查三个模型输出的精度。
+
+P0 实测结果（正确的 2048 MiB workspace）：
+
+- 报告：`results/benchmark_int8-fp16_20260819_153816_summary.md`
+- GPU Compute mean：2593.57 ms
+- Throughput：0.3855 qps
+- `/MatMul`：1170.56 ms，FP16
+- `/MatMul_1`：1167.14 ms，FP16
+- 两个 MatMul 合计：2337.70 ms，占 90.72%
+- MatMul tactic：`sm50_xmma_cublas_gemvx_f16f16_f32_f32...`
+- 实际时间占比：FP16 95.71%、INT8 2.29%、FP32 2.00%
+
+结论：P0 已成功解决 FP32 fallback 和大型 `pre_conv8` 的精度问题，但
+没有恢复 FP16-only 引擎中的 Myelin `MulSum` 图优化。两个 tiny batched
+MatMul 即使改为 FP16 `cublas_gemvx`，仍占 90.72%，因此 P0 未通过性能
+验收，下一步必须进入 P1 图改写。
 
 验收条件：
 
@@ -249,7 +295,7 @@ CUDA Graph 仅在 MatMul tactic 和精度 fallback 修复后进行评估。
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Baseline | FP16 | 256.65 ms | 3.862 qps | 1.274 ms（Myelin） | 109.00 ms | 完成 |
 | Baseline | INT8 only | 2866.67 ms | 0.349 qps | 2504.96 ms | 200.74 ms | 完成，异常 |
-| P0 | INT8 + FP16 fallback | 待测 | 待测 | 待测 | 待测 | 未开始 |
+| P0 | INT8 + FP16 fallback | 2593.57 ms | 0.3855 qps | 2337.70 ms | 待汇总 | 完成，性能未验收 |
 | P1 | MatMul 改写 | 待测 | 待测 | 待测 | 待测 | 未开始 |
 | P2 | 显式 Q/DQ | 待测 | 待测 | 待测 | 待测 | 未开始 |
 | P3-A | `15x1 + 1x15` | 待测 | 待测 | 待测 | 待测 | 未开始 |
@@ -258,10 +304,8 @@ CUDA Graph 仅在 MatMul tactic 和精度 fallback 修复后进行评估。
 
 ## 6. 当前下一步
 
-优先实施 P0：
-
-1. 让 INT8 构建同时开启 FP16 fallback；
-2. 使用独立 engine 和 timing cache；
-3. 重新生成 LayerInfo 和 profile；
-4. 首先确认 `/MatMul`、`/MatMul_1` 和 `pre_conv8` 的实际精度及 tactic；
-5. 若两个 MatMul 仍使用 FP32 `cublas_gemvx`，立即进入 P1 图改写，不继续微调 workspace 或 CUDA Graph。
+P0 已完成，但两个 MatMul 仍使用低效的 FP16 `cublas_gemvx`。当前下一步
+进入 P1：在原始训练/导出模型中将逐像素 `3x3 × 3x1` MatMul 改写成
+elementwise multiply + ReduceSum 或显式三个乘加。暂不继续微调 workspace
+或 CUDA Graph。图改写完成并通过性能验证后，再使用真实代表性数据重新
+校准并进行三个输出的精度验收。

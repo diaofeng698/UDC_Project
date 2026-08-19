@@ -140,7 +140,7 @@ ANALYZE_LOG=/path/trtexec.log SUPPORT_REPORT=/tmp/report.md ./scripts/check_onnx
 默认值在 config/orin_nano.env，可通过环境变量覆盖：
 
 - TRTEXEC=/path/to/trtexec
-- PRECISION=fp32|fp16|int8
+- PRECISION=fp32|fp16|int8|int8-fp16
 - WORKSPACE_MIB=2048
 - BUILD_OPT_LEVEL=5
 - ENGINE_PATH=/path/model.plan
@@ -163,7 +163,15 @@ WORKSPACE_MIB=1024 BUILD_OPT_LEVEL=3 make fp16
 | FP16 | make fp16 | PRECISION=fp16 make benchmark |
 | INT8 | make int8 | make benchmark-int8 |
 
-通用写法：PRECISION=<fp32|fp16|int8> make engine
+通用写法：PRECISION=<fp32|fp16|int8|int8-fp16> make engine。`int8-fp16` 同时启用 INT8 和 FP16，使不适合 INT8 的层可以回退到 FP16，并使用独立的引擎与 timing cache 文件。
+
+INT8 + FP16 fallback：
+
+~~~bash
+make int8-fp16
+make benchmark-int8-fp16
+make infer-int8-fp16
+~~~
 
 INT8 需要以下之一：
 

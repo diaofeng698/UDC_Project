@@ -9,7 +9,7 @@ trtexec_bin="$(find_trtexec)"
 version="$(trt_version "${trtexec_bin}")"
 version="${version:-unknown}"
 output_engine="${ENGINE_PATH:-$(engine_path "${version}")}"
-timing_cache="${ENGINE_DIR}/timing_cache_trt${version}_$(uname -m).bin"
+timing_cache="${TIMING_CACHE_FILE:-${ENGINE_DIR}/timing_cache_trt${version}_$(uname -m)_${PRECISION}_ws${WORKSPACE_MIB}MiB.bin}"
 build_log="${RESULTS_DIR}/build_trt${version}_${PRECISION}.log"
 layer_info="${RESULTS_DIR}/layers_trt${version}_${PRECISION}.json"
 
@@ -21,8 +21,11 @@ fi
 case "${PRECISION}" in
     fp32) precision_args=() ;;
     fp16) precision_args=(--fp16) ;;
-    int8)
+    int8|int8-fp16)
         precision_args=(--int8)
+        if [[ "${PRECISION}" == "int8-fp16" ]]; then
+            precision_args+=(--fp16)
+        fi
         if [[ -n "${CALIBRATION_CACHE:-}" ]]; then
             [[ -r "${CALIBRATION_CACHE}" ]] || {
                 echo "ERROR: calibration cache not readable: ${CALIBRATION_CACHE}" >&2
@@ -39,7 +42,7 @@ case "${PRECISION}" in
         fi
         ;;
     *)
-        echo "ERROR: PRECISION must be fp32, fp16, or int8; got ${PRECISION}" >&2
+        echo "ERROR: PRECISION must be fp32, fp16, int8, or int8-fp16; got ${PRECISION}" >&2
         exit 2
         ;;
 esac
@@ -49,7 +52,9 @@ mkdir -p "${ENGINE_DIR}" "${RESULTS_DIR}"
 args=(
     "--onnx=${MODEL_PATH}"
     "--saveEngine=${output_engine}"
-    "--memPoolSize=workspace:${WORKSPACE_MIB}MiB"
+    # trtexec treats a suffix-free memPoolSize value as MiB. The accepted
+    # binary suffix is "M", not "MiB"; using "MiB" was parsed as bytes.
+    "--memPoolSize=workspace:${WORKSPACE_MIB}"
     "--builderOptimizationLevel=${BUILD_OPT_LEVEL}"
     "--timingCacheFile=${timing_cache}"
     --profilingVerbosity=detailed
@@ -61,6 +66,10 @@ args+=("${precision_args[@]}")
 echo "Building TensorRT ${version} ${PRECISION} engine"
 echo "  model:  ${MODEL_PATH}"
 echo "  engine: ${output_engine}"
+echo "  timing cache: ${timing_cache}"
+if [[ "${PRECISION}" == "int8-fp16" ]]; then
+    echo "  fallback: INT8 layers may fall back to FP16 when TensorRT selects it"
+fi
 echo "  target: ${TARGET_BOARD}, ${TARGET_SOC}, TensorRT ${TARGET_TENSORRT}"
 echo "  note: engines are platform/GPU/TensorRT specific; build this file on the target Orin Nano."
 

@@ -127,7 +127,7 @@ The rule-based review is deliberately conservative. For example, `Resize` is fla
 Defaults are in `config/orin_nano.env`. Every setting can be overridden without editing the file:
 
 - `TRTEXEC=/path/to/trtexec`: explicit TensorRT executable
-- `PRECISION=fp32|fp16|int8`: build precision; the default is `fp32`
+- `PRECISION=fp32|fp16|int8|int8-fp16`: build precision; the default is `fp32`. The `int8-fp16` mode enables FP16 fallback and uses separate engine and timing-cache files.
 - `WORKSPACE_MIB=2048`: TensorRT builder workspace limit
 - `BUILD_OPT_LEVEL=5`: tactic search level; lower it to shorten builds
 - `ENGINE_PATH=/path/model.plan`: explicit plan input/output path
@@ -148,7 +148,7 @@ The following commands provide the simplest precision selection:
 | FP16 | `make fp16` | `PRECISION=fp16 make benchmark` |
 | INT8 | `make int8` | `make benchmark-int8` |
 
-The generic form is `PRECISION=<fp32|fp16|int8> make engine`. Engine filenames include the precision, so FP32, FP16, and INT8 plans can coexist. The benchmark precision must select the corresponding engine filename.
+The generic form is `PRECISION=<fp32|fp16|int8|int8-fp16> make engine`. Engine filenames include the precision, so FP32, FP16, pure INT8, and INT8-with-FP16-fallback plans can coexist. The benchmark precision must select the corresponding engine filename. Use `make int8-fp16`, `make benchmark-int8-fp16`, and `make infer-int8-fp16` for the mixed-precision path.
 
 INT8 is accepted only as an explicit choice. Use an ONNX model with valid Q/DQ quantization, or provide a representative cache with `CALIBRATION_CACHE=/path/to/calibration.cache make int8`.
 

@@ -62,7 +62,7 @@ fi
 
 echo "  CUDA Graph: ${USE_CUDA_GRAPH}"
 echo "  Layer profile: ${ENABLE_LAYER_PROFILE}"
-if [[ "${PRECISION}" == "int8" && "${USE_CUDA_GRAPH}" == "1" ]]; then
+if [[ "${PRECISION}" == int8* && "${USE_CUDA_GRAPH}" == "1" ]]; then
     echo "WARNING: INT8 + CUDA Graph is known to exhaust memory on the target Orin Nano for this engine." >&2
     echo "         Use 'make benchmark-int8' (profile enabled) or 'make benchmark-int8-lite'." >&2
 fi
