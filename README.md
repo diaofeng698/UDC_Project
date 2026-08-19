@@ -2,6 +2,26 @@
 
 This project builds and benchmarks `bnudc_v1_trt_static.onnx` for NVIDIA Jetson Orin Nano Super 8GB. The default engine precision is TensorRT FP32 with batch 1. FP16 and INT8 remain explicit opt-in choices.
 
+## Documentation language
+
+- English: `README.md`
+- 中文: `README.zh.md`
+
+## Quick navigation
+
+- [Production target baseline](#production-target-baseline)
+- [Verified model metadata](#verified-model-metadata)
+- [Why the engine must be built on Jetson](#why-the-engine-must-be-built-on-jetson)
+- [Quick start on Orin Nano](#quick-start-on-orin-nano)
+- [TensorRT-aware ONNX operator check](#tensorrt-aware-onnx-operator-check)
+- [Configuration](#configuration)
+- [Selecting engine precision](#selecting-engine-precision)
+- [Synthetic calibration cache (dummy/random)](#synthetic-calibration-cache-dummyrandom)
+- [C++ forward-inference deployment](#c-forward-inference-deployment)
+- [Optimization sequence](#optimization-sequence)
+- [Benchmark interpretation](#benchmark-interpretation)
+- [Important constraints](#important-constraints)
+
 ## Production target baseline
 
 | Item | Required target |
