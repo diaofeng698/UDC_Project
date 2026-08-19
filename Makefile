@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark benchmark-lite benchmark-int8 benchmark-int8-lite profile-summary cpp-build infer infer-fp32 infer-fp16 infer-int8 fp32 fp16 int8 clean
+.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark benchmark-lite benchmark-int8 benchmark-int8-lite profile-summary calib-cache calib-cache-random int8-random cpp-build infer infer-fp32 infer-fp16 infer-int8 fp32 fp16 int8 clean
 
 check:
 	./scripts/check_env.sh
@@ -34,6 +34,16 @@ benchmark-int8-lite:
 
 profile-summary:
 	./scripts/summarize_latest_profile.sh
+
+calib-cache:
+	./scripts/generate_calibration_cache.sh
+
+calib-cache-random:
+	./scripts/generate_calibration_cache.sh
+
+int8-random:
+	CALIBRATION_CACHE="$${CALIBRATION_CACHE:-results/calibration_cache_random.bin}" ./scripts/generate_calibration_cache.sh
+	CALIBRATION_CACHE="$${CALIBRATION_CACHE:-results/calibration_cache_random.bin}" PRECISION=int8 ./scripts/build_engine.sh
 
 cpp-build:
 	./scripts/build_cpp.sh

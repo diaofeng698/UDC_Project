@@ -130,7 +130,41 @@ The following commands provide the simplest precision selection:
 
 The generic form is `PRECISION=<fp32|fp16|int8> make engine`. Engine filenames include the precision, so FP32, FP16, and INT8 plans can coexist. The benchmark precision must select the corresponding engine filename.
 
-INT8 is accepted only as an explicit choice. Use an ONNX model with valid Q/DQ quantization, or provide a representative cache with `CALIBRATION_CACHE=/path/to/calibration.cache make int8`. Never use random calibration data.
+INT8 is accepted only as an explicit choice. Use an ONNX model with valid Q/DQ quantization, or provide a representative cache with `CALIBRATION_CACHE=/path/to/calibration.cache make int8`.
+
+### Synthetic calibration cache (dummy/random)
+
+For engineering bring-up, parser/build verification, and controlled regression checks, the project provides a synthetic cache generator. It feeds random FP32 input tensors into TensorRT calibration and writes a cache file.
+
+- Default value range is `[-1, 1]`.
+- You can override range, batches, seed, and cache path.
+- Treat synthetic calibration as a debug artifact only. Production INT8 acceptance still requires representative real-data calibration or validated Q/DQ quantization.
+
+Basic usage:
+
+- Generate with defaults:
+
+   `make calib-cache`
+
+- Build INT8 with generated cache:
+
+   `CALIBRATION_CACHE=results/calibration_cache_random.bin make int8`
+
+- One command to generate synthetic cache then build INT8:
+
+   `make int8-random`
+
+- Override random range (example `[-0.5, 0.5]`):
+
+   `CALIBRATION_MIN=-0.5 CALIBRATION_MAX=0.5 make calib-cache`
+
+- Override batches/seed/path:
+
+   `CALIBRATION_BATCHES=64 CALIBRATION_SEED=123 CALIBRATION_CACHE=results/calib_rnd.cache make calib-cache`
+
+- For dynamic ONNX input shapes, pass comma-separated overrides (`name=dimxdim...`):
+
+   `CALIBRATION_INPUT_SHAPES=input=1x3x512x416 make calib-cache`
 
 ## C++ forward-inference deployment
 
@@ -183,7 +217,7 @@ The program deliberately uses one stream and synchronizes each measured request,
 1. **Correctness baseline/default:** build FP32 and compare all three outputs with PyTorch using representative images.
 2. **FP16 deployment:** build FP16, compare output error and application-level metrics, then measure latency and memory. FP16 is the recommended first production target on Orin Nano.
 3. **Pipeline optimization:** keep preprocessing, inference, and postprocessing on GPU; use pinned host buffers, asynchronous CUDA copies, one persistent execution context, and CUDA Graph capture where applicable.
-4. **INT8 only with calibration:** use an ONNX model containing Q/DQ nodes, or provide a representative calibration cache. Validate task metrics before accepting INT8. Random calibration data is invalid.
+4. **INT8 only with calibration:** use an ONNX model containing Q/DQ nodes, or provide a representative calibration cache. Validate task metrics before accepting INT8. Synthetic/random calibration is only for engineering/debug validation.
 5. **Profile before custom plugins:** inspect the exported TensorRT layer profile and `tegrastats`; optimize only measured bottlenecks.
 
 ## Benchmark interpretation
@@ -243,7 +277,7 @@ Disabling CUDA Graph can expose launch overhead, but it cannot explain a multi-s
 
 Do not compare `Sum of average layer times` as the final production latency: separate per-layer profiling adds synchronization/instrumentation and may perturb fused kernels. Compare the main benchmark's GPU Compute Time and host latency from identical non-Graph runs first; use the profile only to locate the regression. Also run the C++ serial path with identical warmup/iterations for an independent end-to-end check.
 
-The supplied ONNX operator inventory contains no `QuantizeLinear` or `DequantizeLinear`. Therefore, an INT8 plan for this model must use a representative calibration cache. The build now rejects bare `make int8`; use `CALIBRATION_CACHE=/path/representative.cache make int8`. `INT8_EXPLICIT_QDQ=1 make int8` is reserved for a separately verified Q/DQ model. After rebuilding, regenerate the profile: reports now include actual TensorRT output precision per layer and time grouped by FP32/FP16/INT8, making precision fallback and conversion-heavy hotspots visible.
+The supplied ONNX operator inventory contains no `QuantizeLinear` or `DequantizeLinear`. Therefore, an INT8 plan for this model must use a calibration cache. The build rejects bare `make int8`; use `CALIBRATION_CACHE=/path/cache.file make int8`. `INT8_EXPLICIT_QDQ=1 make int8` is reserved for a separately verified Q/DQ model. For production acceptance, prefer representative-data calibration; synthetic cache is meant for bring-up/debug scenarios. After rebuilding, regenerate the profile: reports now include actual TensorRT output precision per layer and time grouped by FP32/FP16/INT8, making precision fallback and conversion-heavy hotspots visible.
 
 The script now prints `MemAvailable`, free swap, and Jetson CMA information before loading TensorRT. Also inspect `tegrastats`, close other CUDA applications/camera pipelines/desktops where possible, and reboot before a controlled benchmark. Keep `INFERENCE_STREAMS=1`; each additional stream/context can require another activation workspace.
 
