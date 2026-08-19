@@ -62,7 +62,26 @@ fi
 
 echo "  CUDA Graph: ${USE_CUDA_GRAPH}"
 echo "  Layer profile: ${ENABLE_LAYER_PROFILE}"
+if [[ "${PRECISION}" == "int8" && "${USE_CUDA_GRAPH}" == "1" ]]; then
+    echo "WARNING: INT8 + CUDA Graph is known to exhaust memory on the target Orin Nano for this engine." >&2
+    echo "         Use 'make benchmark-int8' (profile enabled) or 'make benchmark-int8-lite'." >&2
+fi
+
+set +e
 "${trtexec_bin}" "${args[@]}" 2>&1 | tee "${result_prefix}.log"
+trtexec_status=${PIPESTATUS[0]}
+set -e
+if ((trtexec_status != 0)); then
+    if grep -Eqi 'nvmapmemallocinternaltagged|cuda failure: out of memory|out of memory' "${result_prefix}.log"; then
+        echo "ERROR: TensorRT benchmark exhausted Jetson unified memory." >&2
+        if [[ "${USE_CUDA_GRAPH}" == "1" ]]; then
+            echo "       CUDA Graph capture was enabled; retry with USE_CUDA_GRAPH=0." >&2
+        fi
+        echo "       Recommended INT8 command: make benchmark-int8" >&2
+        echo "       Lowest-memory command:     make benchmark-int8-lite" >&2
+    fi
+    exit "${trtexec_status}"
+fi
 
 if [[ "${ENABLE_LAYER_PROFILE}" == "1" && -s "${profile_json}" ]]; then
     python3 "${SCRIPT_DIR}/summarize_profile.py" \

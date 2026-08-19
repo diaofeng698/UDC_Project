@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark benchmark-lite profile-summary cpp-build infer infer-fp32 infer-fp16 infer-int8 fp32 fp16 int8 clean
+.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark benchmark-lite benchmark-int8 benchmark-int8-lite profile-summary cpp-build infer infer-fp32 infer-fp16 infer-int8 fp32 fp16 int8 clean
 
 check:
 	./scripts/check_env.sh
@@ -25,6 +25,12 @@ benchmark:
 
 benchmark-lite:
 	USE_CUDA_GRAPH=0 ENABLE_LAYER_PROFILE=0 INFERENCE_STREAMS=1 ./scripts/benchmark.sh
+
+benchmark-int8:
+	PRECISION=int8 USE_CUDA_GRAPH=0 ENABLE_LAYER_PROFILE=1 INFERENCE_STREAMS=1 ./scripts/benchmark.sh
+
+benchmark-int8-lite:
+	PRECISION=int8 USE_CUDA_GRAPH=0 ENABLE_LAYER_PROFILE=0 INFERENCE_STREAMS=1 ./scripts/benchmark.sh
 
 profile-summary:
 	./scripts/summarize_latest_profile.sh

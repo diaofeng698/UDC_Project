@@ -126,7 +126,7 @@ The following commands provide the simplest precision selection:
 | --- | --- | --- |
 | FP32 (default) | `make engine` or `make fp32` | `make benchmark` |
 | FP16 | `make fp16` | `PRECISION=fp16 make benchmark` |
-| INT8 | `make int8` | `PRECISION=int8 make benchmark` |
+| INT8 | `make int8` | `make benchmark-int8` |
 
 The generic form is `PRECISION=<fp32|fp16|int8> make engine`. Engine filenames include the precision, so FP32, FP16, and INT8 plans can coexist. The benchmark precision must select the corresponding engine filename.
 
@@ -225,14 +225,19 @@ TensorRT `averageMs` is a per-layer GPU execution-time measurement, **not GPU ut
 
 On Orin Nano, CPU and GPU share the same 8GB physical memory. A message such as `NvMapMemAllocInternalTagged ... error 12` followed by `CUDA failure: out of memory` means the NVIDIA memory allocator could not satisfy a runtime allocation. It is not by itself evidence that an INT8 operator is unsupported. INT8 can still consume substantial memory because the engine contains weights, activation tensors, tactic scratch space, reformat/dequantization buffers, execution-context state, CUDA Graph capture allocations, and profiler state.
 
-First run the low-memory benchmark to separate the engine requirement from optional instrumentation:
+The target-board test confirmed that enabling CUDA Graph for this INT8 engine causes OOM, while the non-Graph path is the deployment baseline. This is an engine/board memory-capacity constraint, not an operator-support failure. Use the dedicated INT8 command, which disables CUDA Graph, keeps one stream, and retains layer profiling for optimization:
 
-`PRECISION=int8 make benchmark-lite`
+`make benchmark-int8`
 
-This forces one stream and disables CUDA Graph and per-layer profiling. If it succeeds, add features back independently:
+If layer profiling also needs to be removed for the smallest memory footprint:
 
-- `PRECISION=int8 USE_CUDA_GRAPH=1 ENABLE_LAYER_PROFILE=0 make benchmark`
-- `PRECISION=int8 USE_CUDA_GRAPH=0 ENABLE_LAYER_PROFILE=1 make benchmark`
+`make benchmark-int8-lite`
+
+Do not use the following combination for this engine on the 8GB target because it has now been demonstrated to exceed available unified memory:
+
+`PRECISION=int8 USE_CUDA_GRAPH=1 ENABLE_LAYER_PROFILE=0 make benchmark`
+
+CUDA Graph capture can create or retain graph-private execution allocations in addition to the deserialized engine, execution context, activation memory, and TensorRT scratch buffers. It can reduce CPU launch overhead, but it does not reduce the model's GPU working set. For this model, the additional capture-time allocation is more important than its potential launch-overhead benefit, so production INT8 deployment should keep CUDA Graph disabled unless the engine/memory environment changes and is revalidated.
 
 The script now prints `MemAvailable`, free swap, and Jetson CMA information before loading TensorRT. Also inspect `tegrastats`, close other CUDA applications/camera pipelines/desktops where possible, and reboot before a controlled benchmark. Keep `INFERENCE_STREAMS=1`; each additional stream/context can require another activation workspace.
 
