@@ -1,0 +1,267 @@
+# TensorRT INT8 性能修复与跟踪计划
+
+本文档记录 FP16 与 INT8 benchmark 的性能差异、已确认根因、修复顺序、验证指标和后续实施状态。
+
+## 1. 当前基线
+
+测试环境和输入保持一致：Jetson Orin Nano、TensorRT 10.3.0.30、batch=1、输入 `1x3x512x416`。
+
+| 指标 | FP16 | INT8 | INT8/FP16 |
+| --- | ---: | ---: | ---: |
+| 汇总层耗时 | 261.50 ms | 2866.19 ms | 10.96x |
+| GPU Compute mean | 256.65 ms | 2866.67 ms | 11.17x |
+| 吞吐量 | 3.862 qps | 0.349 qps | 0.09x |
+
+基线结果：
+
+- FP16：`results/benchmark_fp16_20260819_132757_summary.md`
+- INT8：`results/benchmark_int8_20260819_141242_summary.md`
+
+## 2. 已确认的主要问题
+
+### 2.1 两个 FP32 MatMul 严重退化
+
+INT8 引擎中：
+
+| 层 | 实际精度 | 平均耗时 | 占比 |
+| --- | --- | ---: | ---: |
+| `/MatMul` | FP32 | 1255.86 ms | 43.82% |
+| `/MatMul_1` | FP32 | 1249.10 ms | 43.58% |
+| 合计 | FP32 | 2504.96 ms | 87.40% |
+
+它们实际执行大量微型矩阵乘法：
+
+- A：`[212992, 3, 3]`
+- B：`[212992, 3, 1]`
+- 输出：`[212992, 3, 1]`
+
+INT8 引擎为其选择了 FP32 `cublas_gemvx` tactic；FP16 引擎则将相同逻辑优化为多个 Myelin `MulSum` kernel，总计仅约 1.274 ms。
+
+### 2.2 INT8 构建未允许 FP16 fallback
+
+当前 INT8 构建仅传递 `--int8`。无法使用高效 INT8 tactic 的层会回退到 FP32，而不是优先回退到 FP16。
+
+INT8 引擎实际耗时分布：
+
+| 实际精度 | 层数 | 耗时 | 占比 |
+| --- | ---: | ---: | ---: |
+| FP32 | 199 | 2789.72 ms | 97.33% |
+| INT8 | 415 | 76.47 ms | 2.67% |
+
+### 2.3 大型 depthwise 卷积回退 FP32
+
+`15x15 depthwise pre_conv8` 在 FP16 引擎中单层约 5.2 ms，在 INT8 引擎中回退 FP32 后单层约 10 ms。
+
+家族累计耗时：
+
+| 层家族 | FP16 | INT8 |
+| --- | ---: | ---: |
+| `pre_conv8/Conv` | 109.00 ms | 200.74 ms |
+| `conv8/Conv` | 19.34 ms | 26.38 ms |
+
+### 2.4 CUDA Graph 不是主要根因
+
+INT8 benchmark 当前关闭 CUDA Graph，导致 enqueue 时间接近 GPU Compute 时间。启用 CUDA Graph 可以降低 CPU 提交开销，但不能修复单个 MatMul 超过 1.2 秒的问题。
+
+Jetson 统一内存有限，INT8 + CUDA Graph 需要单独进行内存安全验证。
+
+## 3. 修复实施顺序
+
+### P0：构建 INT8 + FP16 fallback 引擎
+
+**目标**：允许普通卷积使用 INT8，INT8 不支持或速度较差的层回退 FP16，而不是 FP32。
+
+计划修改：
+
+- [ ] 修改 `scripts/build_engine.sh`，INT8 构建同时传递 `--int8 --fp16`。
+- [ ] 为混合精度引擎使用独立名称，避免覆盖当前纯 INT8 基线。
+- [ ] 使用新的 timing cache，或清除旧缓存后做一次干净构建。
+- [ ] 保留当前随机 calibration cache 仅用于性能链路验证。
+- [ ] 后续用真实代表性数据重新生成 calibration cache。
+
+构建后必须检查：
+
+- [ ] `/MatMul` 和 `/MatMul_1` 是否从 profile 中消失。
+- [ ] 是否重新出现 `__myl_MulSum_*` kernel。
+- [ ] 大型 `pre_conv8` 是否从 FP32 变为 FP16 或 INT8。
+- [ ] FP32 时间占比是否从 97.33% 大幅下降。
+- [ ] GPU Compute 是否接近或低于 FP16 基线 256.65 ms。
+- [ ] 使用真实数据检查三个模型输出的精度。
+
+验收条件：
+
+1. 两个 MatMul 不再合计占用超过 5% 的推理时间。
+2. 不再使用当前 FP32 `cublas_gemvx` tactic。
+3. INT8 混合精度延迟不得明显高于 FP16；目标是低于 FP16。
+4. 精度指标满足业务要求。
+
+### P1：改写两个 tiny batched MatMul
+
+**目标**：避免 TensorRT 将逐像素 `3x3 × 3x1` 运算解释为 212,992 个微型 GEMV。
+
+原始逻辑：
+
+$$
+y_{n,i}=\sum_{j=0}^{2}A_{n,i,j}x_{n,j}
+$$
+
+候选改写：
+
+1. elementwise multiply + 最后一维 `ReduceSum`；
+2. 显式展开三个乘加：
+
+$$
+y_i=A_{i,0}x_0+A_{i,1}x_1+A_{i,2}x_2
+$$
+
+3. 必要时实现专用 TensorRT plugin，将逐像素矩阵向量乘法融合为单个 kernel。
+
+实施任务：
+
+- [ ] 在原始 PyTorch 模型中定位产生 `/MatMul` 和 `/MatMul_1` 的代码。
+- [ ] 添加等价的 elementwise + reduction 实现。
+- [ ] 在 PyTorch 中验证改写前后的数值一致性。
+- [ ] 重新导出 ONNX。
+- [ ] 检查 ONNX 中是否仍存在对应 `MatMul`。
+- [ ] 分别构建 FP16 和 INT8 + FP16 fallback 引擎。
+- [ ] 检查 TensorRT LayerInfo 和 profile。
+
+验收条件：
+
+1. LayerInfo 不再出现这两个 `CaskGemmMatrixMultiply/cublas_gemvx` 层。
+2. 替代实现总耗时低于 5 ms，目标接近 FP16 Myelin 路径的约 1.3 ms。
+3. 改写前后输出误差满足设定阈值。
+
+### P2：采用显式 Q/DQ 量化
+
+**目标**：明确控制哪些层使用 INT8、FP16 或 FP32，避免隐式校准产生不理想的量化边界和图切分。
+
+实施任务：
+
+- [ ] 准备具有代表性的真实校准数据集。
+- [ ] 建立 FP32、FP16、PTQ/QAT 输出精度评估脚本。
+- [ ] 优先尝试 PTQ 导出显式 Q/DQ ONNX。
+- [ ] 若 PTQ 精度不足，实施 QAT。
+- [ ] 普通卷积优先 INT8。
+- [ ] `pre_conv8` 根据实测明确保留 FP16 或改为 INT8。
+- [ ] MatMul/替代算子明确保留最高效且满足精度的执行类型。
+- [ ] 检查 Q/DQ 是否阻碍原有 Conv + Add + LeakyReLU 融合。
+
+精度验收至少包括：
+
+- 三个输出分别比较；
+- 最大绝对误差；
+- 平均绝对误差；
+- PSNR；
+- SSIM；
+- 实际业务指标。
+
+性能验收：
+
+- INT8 实际耗时占比显著提升；
+- FP32 fallback 不再主导总时间；
+- Reformat/Copy 不因 Q/DQ 边界大幅增加；
+- 端到端 GPU Compute 低于 FP16 基线。
+
+### P3：继续优化 `15x15 depthwise pre_conv8`
+
+**目标**：解决 MatMul 后继续降低占比最高的卷积家族。
+
+仓库已提供两个训练模块：
+
+1. `15x1 + 1x15` depthwise：
+   - `training_modules/depthwise_15x15_separable.py`
+   - 理论 MAC 从每通道 225 降至 30；
+   - 支持逐通道 SVD 初始化；
+   - 适合预训练模型微调。
+
+2. 7 个 `3x3` depthwise：
+   - `training_modules/depthwise_15x15_stack.py`
+   - 保持 `15x15` 感受野；
+   - 理论 MAC 从每通道 225 降至 63；
+   - 需要重新训练或充分微调。
+
+使用示例：
+
+- `training_modules/example_usage.py`
+
+实施任务：
+
+- [ ] 先在单个 ORSNet block 上替换并做消融实验。
+- [ ] 比较原始、可分离卷积和 7 层小卷积的训练收敛。
+- [ ] 对比参数量、MAC、FP16 延迟和 INT8 混合精度延迟。
+- [ ] 检查 7 个小卷积增加的 kernel launch 和中间显存读写成本。
+- [ ] 验证 TensorRT 是否保持 Conv + activation 融合。
+- [ ] 精度满足要求后逐步扩展到全部 `pre_conv8`。
+
+验收条件：
+
+1. `pre_conv8` 家族累计耗时低于当前 FP16 的 109 ms。
+2. 模型质量满足业务阈值。
+3. 端到端延迟取得稳定改善，而不只是理论 MAC 降低。
+
+### P4：评估 CUDA Graph
+
+**目标**：在计算层问题修复后降低 enqueue 开销。
+
+实施任务：
+
+- [ ] 先使用 `USE_CUDA_GRAPH=0` 建立稳定的混合精度基线。
+- [ ] 记录推理前后的 Jetson 可用统一内存。
+- [ ] 使用 `USE_CUDA_GRAPH=1` 单独测试。
+- [ ] 比较 GPU Compute、Enqueue Time、吞吐量和内存峰值。
+- [ ] 若发生 OOM，保留关闭状态，不将其作为核心优化方向。
+
+CUDA Graph 仅在 MatMul tactic 和精度 fallback 修复后进行评估。
+
+## 4. 每轮实验的统一流程
+
+1. 固定 Jetson 功耗模式和时钟。
+2. 保持输入 shape、batch、stream、warmup 和 benchmark 时间一致。
+3. 每个配置至少运行三次。
+4. 保存构建日志、LayerInfo、profile、times 和 summary。
+5. 对比中位数，并记录波动范围。
+6. 使用相同真实验证集执行精度评估。
+
+每次实验记录：
+
+| 字段 | 内容 |
+| --- | --- |
+| 日期 |  |
+| Git commit |  |
+| 模型/ONNX |  |
+| TensorRT 版本 |  |
+| 构建参数 |  |
+| calibration/Q-DQ |  |
+| timing cache |  |
+| CUDA Graph |  |
+| GPU Compute mean/P50/P95 |  |
+| Throughput |  |
+| MatMul 总耗时 |  |
+| pre_conv8 总耗时 |  |
+| FP32/FP16/INT8 时间占比 |  |
+| 精度指标 |  |
+| 结论 |  |
+
+## 5. 结果跟踪表
+
+| 阶段 | 配置 | GPU Compute mean | Throughput | MatMul 总耗时 | pre_conv8 总耗时 | 状态 |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Baseline | FP16 | 256.65 ms | 3.862 qps | 1.274 ms（Myelin） | 109.00 ms | 完成 |
+| Baseline | INT8 only | 2866.67 ms | 0.349 qps | 2504.96 ms | 200.74 ms | 完成，异常 |
+| P0 | INT8 + FP16 fallback | 待测 | 待测 | 待测 | 待测 | 未开始 |
+| P1 | MatMul 改写 | 待测 | 待测 | 待测 | 待测 | 未开始 |
+| P2 | 显式 Q/DQ | 待测 | 待测 | 待测 | 待测 | 未开始 |
+| P3-A | `15x1 + 1x15` | 待测 | 待测 | 待测 | 待测 | 未开始 |
+| P3-B | 7 个 `3x3` | 待测 | 待测 | 待测 | 待测 | 未开始 |
+| P4 | CUDA Graph | 待测 | 待测 | 待测 | 待测 | 未开始 |
+
+## 6. 当前下一步
+
+优先实施 P0：
+
+1. 让 INT8 构建同时开启 FP16 fallback；
+2. 使用独立 engine 和 timing cache；
+3. 重新生成 LayerInfo 和 profile；
+4. 首先确认 `/MatMul`、`/MatMul_1` 和 `pre_conv8` 的实际精度及 tactic；
+5. 若两个 MatMul 仍使用 FP32 `cublas_gemvx`，立即进入 P1 图改写，不继续微调 workspace 或 CUDA Graph。
