@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark benchmark-lite benchmark-int8 benchmark-int8-lite benchmark-int8-fp16 benchmark-int8-fp16-lite profile-summary calib-cache calib-cache-random int8-random int8-fp16-random cpp-build infer infer-fp32 infer-fp16 infer-int8 infer-int8-fp16 fp32 fp16 int8 int8-fp16 clean
+.PHONY: check onnx-check onnx-check-fp32 onnx-check-fp16 onnx-check-int8 engine benchmark benchmark-lite benchmark-int8 benchmark-int8-lite benchmark-int8-fp16 benchmark-int8-fp16-lite profile-summary calib-cache calib-cache-random int8-random int8-fp16-random cpp-build infer infer-fp32 infer-fp16 infer-int8 infer-int8-fp16 fp32 fp16 int8 int8-fp16 tiny-matvec-reduce tiny-matvec-expanded tiny-matvec-onnx clean
 
 check:
 	./scripts/check_env.sh
@@ -84,6 +84,15 @@ int8:
 
 int8-fp16:
 	CALIBRATION_CACHE="$${CALIBRATION_CACHE:-results/calibration_cache_random.bin}" PRECISION=int8-fp16 ./scripts/build_engine.sh
+
+tiny-matvec-reduce:
+	python3 -m training_modules.tiny_matvec_3x3_example --implementation reduce
+
+tiny-matvec-expanded:
+	python3 -m training_modules.tiny_matvec_3x3_example --implementation expanded
+
+tiny-matvec-onnx:
+	python3 scripts/export_tiny_matvec_onnx.py --implementation both --two-matvecs
 
 clean:
 	rm -rf engines results build
