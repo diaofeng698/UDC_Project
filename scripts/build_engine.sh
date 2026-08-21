@@ -32,13 +32,16 @@ case "${PRECISION}" in
                 exit 1
             }
             precision_args+=("--calib=${CALIBRATION_CACHE}")
-        elif [[ "${INT8_EXPLICIT_QDQ:-0}" == "1" ]]; then
-            echo "INFO: using explicit Q/DQ quantization declared by INT8_EXPLICIT_QDQ=1."
         else
-            echo "ERROR: INT8 requires representative CALIBRATION_CACHE or an explicit Q/DQ ONNX model." >&2
-            echo "       This model's observed operator inventory contains no QuantizeLinear/DequantizeLinear nodes." >&2
-            echo "       For a verified Q/DQ model, set INT8_EXPLICIT_QDQ=1." >&2
-            exit 2
+            qdq_audit="${RESULTS_DIR}/qdq_audit_$(basename "${MODEL_PATH}" .onnx).json"
+            if python3 "${SCRIPT_DIR}/inspect_qdq_onnx.py" \
+                --model "${MODEL_PATH}" --output "${qdq_audit}" --require-qdq; then
+                echo "INFO: verified explicit Q/DQ model; no legacy calibration cache is used."
+            else
+                echo "ERROR: INT8 requires representative CALIBRATION_CACHE or a verified explicit Q/DQ ONNX model." >&2
+                echo "       Generate one with scripts/quantize_qdq_ptq.py; INT8_EXPLICIT_QDQ no longer bypasses graph validation." >&2
+                exit 2
+            fi
         fi
         ;;
     *)

@@ -184,14 +184,23 @@ $$
 
 实施任务：
 
-- [ ] 准备具有代表性的真实校准数据集。
-- [ ] 建立 FP32、FP16、PTQ/QAT 输出精度评估脚本。
-- [ ] 优先尝试 PTQ 导出显式 Q/DQ ONNX。
+- [ ] 准备具有代表性的真实校准数据集（已提供 NPY/NPZ manifest 和校验工具，待放入真实数据）。
+- [x] 建立 FP32、FP16、PTQ/QAT 输出精度评估脚本。
+- [x] 提供 PTQ 显式 Q/DQ ONNX 导出和图审计工具（待真实数据执行）。
 - [ ] 若 PTQ 精度不足，实施 QAT。
-- [ ] 普通卷积优先 INT8。
-- [ ] `pre_conv8` 根据实测明确保留 FP16 或改为 INT8。
-- [ ] MatMul/替代算子明确保留最高效且满足精度的执行类型。
-- [ ] 检查 Q/DQ 是否阻碍原有 Conv + Add + LeakyReLU 融合。
+- [x] PTQ 策略默认普通卷积优先 INT8。
+- [ ] `pre_conv8` 根据实测明确保留 FP16 或改为 INT8（工具支持两种策略）。
+- [ ] MatMul/替代算子明确保留最高效且满足精度的执行类型（工具支持选择性排除/量化）。
+- [ ] 检查 Q/DQ 是否阻碍原有 Conv + Add + LeakyReLU 融合（已增加 ONNX 审计和 profile 信号，待目标板实测）。
+
+P2 工具和完整命令见 `README_P2_EXPLICIT_QDQ.zh.md`。主要入口：
+
+- `make p2-manifest`：创建固定顺序、带 SHA-256 的真实张量清单；
+- `make p2-ptq`：使用真实 NPY/NPZ 张量执行静态 PTQ，导出显式 Q/DQ；
+- `make p2-audit`：检查 Q/DQ 数量、边界、`pre_conv8` 和融合邻域；
+- `make p2-engine`、`make p2-benchmark`：构建和 profile Q/DQ INT8 + FP16 fallback 引擎；
+- `make p2-accuracy`：逐输出计算最大/平均绝对误差、PSNR、SSIM；
+- `scripts/check_p2_profile.py`：比较 FP16/QDQ 的精度占比、MatMul、Reformat 和融合签名。
 
 精度验收至少包括：
 
@@ -209,9 +218,9 @@ $$
 - Reformat/Copy 不因 Q/DQ 边界大幅增加；
 - 端到端 GPU Compute 低于 FP16 基线。
 
-### P3：继续优化 `15x15 depthwise pre_conv8`
+### P3：`15x15 depthwise pre_conv8` 可分离改写（已实现）
 
-**目标**：解决 MatMul 后继续降低占比最高的卷积家族。
+**目标**：将原始 `15x15 depthwise pre_conv8` 改为更低成本的卷积家族。当前部署模型 `bnudc_separable.onnx` 已完成 `15x1 + 1x15` 改写，节点名分别为 `pre_conv8/vertical/Conv` 和 `pre_conv8/horizontal/Conv`。
 
 仓库已提供两个训练模块：
 
@@ -231,18 +240,18 @@ $$
 
 - `training_modules/example_usage.py`
 
-实施任务：
+当前模型确认结果：
 
-- [ ] 先在单个 ORSNet block 上替换并做消融实验。
-- [ ] 比较原始、可分离卷积和 7 层小卷积的训练收敛。
-- [ ] 对比参数量、MAC、FP16 延迟和 INT8 混合精度延迟。
-- [ ] 检查 7 个小卷积增加的 kernel launch 和中间显存读写成本。
-- [ ] 验证 TensorRT 是否保持 Conv + activation 融合。
-- [ ] 精度满足要求后逐步扩展到全部 `pre_conv8`。
+- [x] `bnudc_separable.onnx` 已在全部相关模块中导出 `vertical`/`horizontal` 两级卷积。
+- [x] TensorRT calibration cache 和 LayerInfo 中可识别这两个节点家族。
+- [x] 当前 profile 中 separable `pre_conv8` 家族累计耗时：FP32 约 39.36 ms、FP16 约 32.88 ms、INT8 + FP16 fallback 约 35.76 ms、纯 INT8 约 46.11 ms。
+- [ ] 使用真实数据完成可分离模型相对原始 `15x15` 模型的三个输出和业务精度验收。
+- [ ] 在 P2 显式 Q/DQ 中比较整对 `vertical + horizontal` 保留 FP16 与改为 INT8；当前 profile 表明纯 INT8 并不天然更快。
+- [ ] 检查显式 Q/DQ 是否拆散 `horizontal/Conv` 与后续 activation/residual 融合。
 
 验收条件：
 
-1. `pre_conv8` 家族累计耗时低于当前 FP16 的 109 ms。
+1. separable `pre_conv8` 家族累计耗时保持低于原始 FP16 的 109 ms；当前 FP16 实测约 32.88 ms，已满足性能条件。
 2. 模型质量满足业务阈值。
 3. 端到端延迟取得稳定改善，而不只是理论 MAC 降低。
 
@@ -297,8 +306,8 @@ CUDA Graph 仅在 MatMul tactic 和精度 fallback 修复后进行评估。
 | Baseline | INT8 only | 2866.67 ms | 0.349 qps | 2504.96 ms | 200.74 ms | 完成，异常 |
 | P0 | INT8 + FP16 fallback | 2593.57 ms | 0.3855 qps | 2337.70 ms | 待汇总 | 完成，性能未验收 |
 | P1 | MatMul 改写 | 待测 | 待测 | 待测 | 待测 | 未开始 |
-| P2 | 显式 Q/DQ | 待测 | 待测 | 待测 | 待测 | 未开始 |
-| P3-A | `15x1 + 1x15` | 待测 | 待测 | 待测 | 待测 | 未开始 |
+| P2 | 显式 Q/DQ | 待测 | 待测 | 待测 | 待测 | 工具完成，待真实数据实测 |
+| P3-A | `15x1 + 1x15` | 当前整模型结果见 20260820 profile | 待汇总 | 取决于 P1 | FP16 32.88 ms | 已实现，待真实精度验收 |
 | P3-B | 7 个 `3x3` | 待测 | 待测 | 待测 | 待测 | 未开始 |
 | P4 | CUDA Graph | 待测 | 待测 | 待测 | 待测 | 未开始 |
 

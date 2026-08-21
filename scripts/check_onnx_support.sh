@@ -43,7 +43,7 @@ if [[ -z "${ANALYZE_LOG:-}" ]]; then
         "--onnx=${MODEL_PATH}"
         --skipInference
         --verbose
-        "--memPoolSize=workspace:${WORKSPACE_MIB}MiB"
+        "--memPoolSize=workspace:${WORKSPACE_MIB}"
         "--builderOptimizationLevel=${BUILD_OPT_LEVEL}"
     )
     args+=("${precision_args[@]}")

@@ -194,6 +194,29 @@ def main() -> int:
         precisions[row["execution_precision"]]["count"] += 1
     precision_rows = sorted(precisions.items(), key=lambda item: item[1]["time"], reverse=True)
 
+    def aggregate_rows(predicate: Any) -> dict[str, float | int]:
+        selected = [row for row in rows if predicate(row)]
+        time_ms = sum(row["average_ms"] for row in selected)
+        return {
+            "layer_count": len(selected),
+            "average_ms": time_ms,
+            "share": time_ms / total_ms * 100.0,
+        }
+
+    p2_metrics = {
+        "matmul": aggregate_rows(lambda row: row["category"] == "MatrixMultiply"),
+        "separable_pre_conv8": aggregate_rows(
+            lambda row: re.search(r"/pre_conv8/(?:vertical|horizontal)/Conv", row["name"], re.I) is not None
+        ),
+        "reformat_copy": aggregate_rows(lambda row: row["category"] == "Reformat/Copy"),
+        "fp32": aggregate_rows(lambda row: "FP32" in row["execution_precision"]),
+        "int8": aggregate_rows(lambda row: "INT8" in row["execution_precision"]),
+        "conv_add_activation_fusion_signatures": aggregate_rows(
+            lambda row: "conv" in row["name"].lower()
+            and ("add" in row["name"].lower() or "relu" in row["name"].lower())
+        ),
+    }
+
     candidate_rows = [row for row in rows if row["share"] >= 3.0 or row["cumulative"] - row["share"] < 80.0]
     tiny_rows = [row for row in rows if row["share"] < 1.0]
     top_limit = max(1, min(args.top, len(rows)))
@@ -224,6 +247,7 @@ def main() -> int:
             {"precision": precision, "layer_count": int(values["count"]), "average_ms": values["time"], "share": values["time"] / total_ms * 100.0}
             for precision, values in precision_rows
         ],
+        "p2_acceptance_metrics": p2_metrics,
         "optimization_candidates": [row["name"] for row in candidate_rows],
     }
     json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -239,6 +263,12 @@ def main() -> int:
         report.write(f"- Layers required for 50/80/90/95% of time: **{pareto_count(rows, 50)}/{pareto_count(rows, 80)}/{pareto_count(rows, 90)}/{pareto_count(rows, 95)}**\n")
         report.write(f"- Long tail below 1% each: **{len(tiny_rows)} layers**, together **{sum(row['share'] for row in tiny_rows):.2f}%**\n")
         report.write(f"- Optimization candidates (>=3% individually or within cumulative 80%): **{len(candidate_rows)}**\n\n")
+
+        report.write("## P2 explicit Q/DQ acceptance signals\n\n")
+        report.write("| Signal | Layers | Avg ms | Share |\n| --- | ---: | ---: | ---: |\n")
+        for signal, values in p2_metrics.items():
+            report.write(f"| {signal} | {values['layer_count']} | {values['average_ms']:.5f} | {values['share']:.2f}% |\n")
+        report.write("\nFusion signatures are layer-name heuristics; confirm actual fusion in TensorRT LayerInfo.\n\n")
 
         report.write("## Hot layers by average GPU execution time\n\n")
         report.write("| Rank | Layer | Type | Precision | Category | Avg ms | Share | Cumulative |\n| ---: | --- | --- | --- | --- | ---: | ---: | ---: |\n")

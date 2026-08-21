@@ -1,0 +1,6 @@
+# Host-side explicit Q/DQ PTQ and ONNX accuracy evaluation.
+# On Jetson, use NVIDIA's matching ONNX Runtime GPU wheel instead of the
+# generic onnxruntime package when CUDA/TensorRT Execution Providers are needed.
+numpy>=1.21
+onnx>=1.14,<2
+onnxruntime>=1.17,<2
